@@ -44,14 +44,14 @@ phases:
     commands:
       - echo "=== [Pre-Build] Initializing build environment and ECR authentication ==="
       # Dynamically discover AWS Account ID from the CodeBuild execution role
-      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      - REPO_URI="$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/fleet-service"
+      - export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - export REPO_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/fleet-service"
       # Generate an immutable, timestamped release tag for traceability
-      - TAG="release-$(date -u +%Y.%m.%d).${CODEBUILD_BUILD_NUMBER:-1}"
-      - echo "Target ECR Repository: $REPO_URI"
-      - echo "Generated Release Tag:  $TAG"
+      - export TAG="release-$(date -u +%Y.%m.%d).${CODEBUILD_BUILD_NUMBER:-1}"
+      - echo "Target ECR Repository: ${REPO_URI}"
+      - echo "Generated Release Tag:  ${TAG}"
       - echo "Logging in to Amazon ECR registry..."
-      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+      - aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
   build:
     commands:
@@ -63,24 +63,24 @@ phases:
       - echo "Configuring executable permissions for lifecycle hook scripts..."
       - chmod +x scripts/start.sh scripts/health.sh
       # Build the production container image
-      - echo "Building production Docker image: $REPO_URI:$TAG..."
-      - docker build -t "$REPO_URI:$TAG" .
+      - echo "Building production Docker image: ${REPO_URI}:${TAG}..."
+      - docker build -t "${REPO_URI}:${TAG}" .
 
   post_build:
     commands:
       - echo "=== [Post-Build] Pushing image and generating CodeDeploy manifests ==="
       # Push image to Amazon ECR
       - echo "Pushing container image to ECR..."
-      - docker push "$REPO_URI:$TAG"
+      - docker push "${REPO_URI}:${TAG}"
       # Retrieve the immutable SHA-256 manifest digest from ECR
       - echo "Resolving published image SHA-256 digest from ECR..."
-      - DIGEST=$(aws ecr describe-images --repository-name fleet-service --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
-      - test -n "$DIGEST" && test "$DIGEST" != "None"
-      - echo "Pushed Image Digest: $DIGEST"
+      - export DIGEST=$(aws ecr describe-images --repository-name fleet-service --image-ids imageTag="${TAG}" --query 'imageDetails[0].imageDigest' --output text)
+      - test -n "${DIGEST}" && test "${DIGEST}" != "None"
+      - echo "Pushed Image Digest: ${DIGEST}"
       # Generate the release manifest files that the EC2 hook scripts will read
       - echo "Writing release-image.txt with digest-pinned URI..."
-      - printf '%s@%s\n' "$REPO_URI" "$DIGEST" > release-image.txt
-      - printf '%s\n' "$TAG" > release-tag.txt
+      - printf '%s@%s\n' "${REPO_URI}" "${DIGEST}" > release-image.txt
+      - printf '%s\n' "${TAG}" > release-tag.txt
       - echo "Release manifest content:"
       - cat release-image.txt
 
