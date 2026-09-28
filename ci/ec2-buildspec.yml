@@ -1,0 +1,46 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "=== Starting Pre-Build Phase ==="
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REPO_URI="$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/fleet-service"
+      - TAG="release-$(date -u +%Y.%m.%d).${CODEBUILD_BUILD_NUMBER:-1}"
+      - echo "Target repository: $REPO_URI"
+      - echo "Generated release tag: $TAG"
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+
+  build:
+    commands:
+      - echo "=== Starting Build Phase ==="
+      - echo "Executing automated unit tests..."
+      - npm test
+      - echo "Ensuring scripts have execute permissions..."
+      - chmod +x scripts/start.sh scripts/health.sh
+      - echo "Building production Docker image..."
+      - docker build -t "$REPO_URI:$TAG" .
+
+  post_build:
+    commands:
+      - echo "=== Starting Post-Build Phase ==="
+      - echo "Pushing immutable Docker image to ECR..."
+      - docker push "$REPO_URI:$TAG"
+      - echo "Retrieving pushed image digest..."
+      - DIGEST=$(aws ecr describe-images --repository-name fleet-service --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+      - test -n "$DIGEST" && test "$DIGEST" != "None"
+      - echo "Pushed image digest: $DIGEST"
+      - echo "Writing release manifest files..."
+      - printf '%s@%s\n' "$REPO_URI" "$DIGEST" > release-image.txt
+      - printf '%s\n' "$TAG" > release-tag.txt
+      - cat release-image.txt
+
+artifacts:
+  files:
+    - appspec.yml
+    - release-image.txt
+    - release-tag.txt
+    - scripts/start.sh
+    - scripts/health.sh
+  discard-paths: no

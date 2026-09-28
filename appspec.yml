@@ -1,0 +1,14 @@
+version: 0.0
+os: linux
+files:
+  - source: /release-image.txt
+    destination: /opt/fleet-release
+hooks:
+  ApplicationStart:
+    - location: scripts/start.sh
+      timeout: 300
+      runas: root
+  ValidateService:
+    - location: scripts/health.sh
+      timeout: 120
+      runas: root

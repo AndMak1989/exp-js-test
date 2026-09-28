@@ -1,0 +1,39 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "=== Starting Pre-Build Phase ==="
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REPO_URI="$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/notes-api"
+      - COMMIT_HASH=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-local}" | cut -c1-7)
+      - TAG="${COMMIT_HASH}-${CODEBUILD_BUILD_NUMBER:-1}"
+      - echo "Target repository: $REPO_URI"
+      - echo "Generated release tag: $TAG"
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+
+  build:
+    commands:
+      - echo "=== Starting Build Phase ==="
+      - echo "Executing automated unit tests..."
+      - npm test
+      - echo "Building production Docker image..."
+      - docker build -t "$REPO_URI:$TAG" .
+
+  post_build:
+    commands:
+      - echo "=== Starting Post-Build Phase ==="
+      - echo "Pushing immutable Docker image to ECR..."
+      - docker push "$REPO_URI:$TAG"
+      - echo "Retrieving pushed image digest..."
+      - DIGEST=$(aws ecr describe-images --repository-name notes-api --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+      - test -n "$DIGEST" && test "$DIGEST" != "None"
+      - echo "Pushed image digest: $DIGEST"
+      - echo "Writing imagedefinitions.json for ECS standard deployment..."
+      - printf '[{"name":"notes-api","imageUri":"%s@%s"}]\n' "$REPO_URI" "$DIGEST" > imagedefinitions.json
+      - cat imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json

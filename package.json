@@ -1,0 +1,17 @@
+{
+  "name": "aws-cicd-demo-service",
+  "version": "1.0.0",
+  "description": "Production-ready Node.js microservice for AWS CI/CD pipeline demonstrations (ECS Fargate & EC2 Auto Scaling)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "keywords": ["aws", "cicd", "ecs", "fargate", "ec2", "codepipeline", "codedeploy"],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "private": true
+}
