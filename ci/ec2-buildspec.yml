@@ -1,96 +1,35 @@
-# ==============================================================================
-# AWS CodeBuild Buildspec: EC2 Auto Scaling + CodeDeploy Track
-# File Path: ci/ec2-buildspec.yml
-# ==============================================================================
-#
-# PURPOSE & ARCHITECTURAL ROLE:
-# -----------------------------
-# This file instructs AWS CodeBuild on how to test the application, build and push
-# an immutable Docker container image to Amazon ECR, and assemble the deployment
-# bundle required by AWS CodeDeploy for in-place rolling updates across an EC2
-# Auto Scaling Group (ASG).
-#
-# WHY DO WE NEED THIS FILE?
-# -------------------------
-# Unlike container-native platforms (like ECS) which accept simple JSON image definitions,
-# AWS CodeDeploy deploys to EC2 hosts via a deployment revision bundle (a ZIP archive in S3).
-#
-# CodeDeploy itself DOES NOT natively know how to build Docker images, pull from ECR, or
-# coordinate container runtimes on EC2 instances. Instead, CodeDeploy relies on:
-#   1. An "appspec.yml" manifest in the root of the revision bundle.
-#   2. Lifecycle hook scripts (e.g. scripts/start.sh, scripts/health.sh).
-#   3. A release manifest containing the exact image digest (release-image.txt).
-#
-# This buildspec bridges that gap by acting as the factory:
-#   1. It enforces quality by running automated unit tests ('npm test'). If tests fail,
-#      the build fails immediately, stopping the pipeline before any image is pushed.
-#   2. It builds the production Docker container and pushes it to Amazon ECR ('fleet-service').
-#   3. It queries ECR for the newly pushed image's SHA-256 digest to enforce digest pinning.
-#   4. It writes 'release-image.txt' and 'release-tag.txt' containing the pinned URI.
-#   5. It bundles 'appspec.yml', the release manifest, and the hook scripts into the
-#      CodePipeline output artifact ('FleetBuild') so CodeDeploy can execute them on EC2.
-#
-# DOWNSTREAM CONSUMER:
-# --------------------
-# CodePipeline passes this artifact to the AWS CodeDeploy action. CodeDeploy pushes
-# this bundle to each EC2 instance in 'fleet-asg', where the local CodeDeploy Agent
-# executes the scripts to safely drain traffic, update the container, and validate health.
-# ==============================================================================
-
 version: 0.2
 
 phases:
   pre_build:
     commands:
-      - echo "=== [Pre-Build] Initializing build environment and ECR authentication ==="
-      # Dynamically discover AWS Account ID from the CodeBuild execution role
+      - echo "=== [Pre-Build] Authenticating with ECR ==="
       - export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - export REPO_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/fleet-service"
-      # Generate an immutable, timestamped release tag for traceability
       - export TAG="release-$(date -u +%Y.%m.%d).${CODEBUILD_BUILD_NUMBER:-1}"
-      - echo "Target ECR Repository: ${REPO_URI}"
-      - echo "Generated Release Tag:  ${TAG}"
-      - echo "Logging in to Amazon ECR registry..."
       - aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
   build:
     commands:
-      - echo "=== [Build] Running test suite and compiling Docker image ==="
-      # Quality Gate: Execute automated unit tests. Non-zero exit code halts the entire build.
-      - echo "Executing unit tests (npm test)..."
+      - echo "=== [Build] Running tests and building container ==="
       - npm test
-      # Ensure hook scripts retain Linux execute bits (+x) inside the CodePipeline artifact
-      - echo "Configuring executable permissions for lifecycle hook scripts..."
       - chmod +x scripts/start.sh scripts/health.sh
-      # Build the production container image
-      - echo "Building production Docker image: ${REPO_URI}:${TAG}..."
       - docker build -t "${REPO_URI}:${TAG}" .
 
   post_build:
     commands:
-      - echo "=== [Post-Build] Pushing image and generating CodeDeploy manifests ==="
-      # Push image to Amazon ECR
-      - echo "Pushing container image to ECR..."
+      - echo "=== [Post-Build] Pushing image and packaging manifests ==="
       - docker push "${REPO_URI}:${TAG}"
-      # Retrieve the immutable SHA-256 manifest digest from ECR
-      - echo "Resolving published image SHA-256 digest from ECR..."
-      - export DIGEST=$(aws ecr describe-images --repository-name fleet-service --image-ids imageTag="${TAG}" --query 'imageDetails[0].imageDigest' --output text)
-      - test -n "${DIGEST}" && test "${DIGEST}" != "None"
-      - echo "Pushed Image Digest: ${DIGEST}"
-      # Generate the release manifest files that the EC2 hook scripts will read
-      - echo "Writing release-image.txt with digest-pinned URI..."
+      - export DIGEST=$(aws ecr describe-images --repository-name fleet-service --image-ids imageTag="${TAG}" --query "imageDetails[0].imageDigest" --output text)
       - printf '%s@%s\n' "${REPO_URI}" "${DIGEST}" > release-image.txt
       - printf '%s\n' "${TAG}" > release-tag.txt
-      - echo "Release manifest content:"
       - cat release-image.txt
 
 artifacts:
-  # The files below are bundled by CodePipeline into the root of the 'FleetBuild' zip
   files:
     - appspec.yml
     - release-image.txt
     - release-tag.txt
     - scripts/start.sh
     - scripts/health.sh
-  # Crucial: 'discard-paths: no' preserves the scripts/ directory hierarchy in the zip
   discard-paths: no

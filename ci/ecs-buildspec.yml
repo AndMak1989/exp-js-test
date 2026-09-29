@@ -1,98 +1,29 @@
-# ==============================================================================
-# AWS CodeBuild Buildspec: ECS Fargate Rolling Update Track
-# File Path: ci/ecs-buildspec.yml
-# ==============================================================================
-#
-# PURPOSE & ARCHITECTURAL ROLE:
-# -----------------------------
-# This file instructs AWS CodeBuild on how to test the application, compile and push
-# an immutable Docker container image to Amazon ECR, and generate the deployment
-# descriptor ('imagedefinitions.json') required by the Amazon ECS (standard) deployment
-# action in AWS CodePipeline.
-#
-# WHY DO WE NEED THIS FILE?
-# -------------------------
-# AWS CodePipeline features a native, serverless deployment provider called
-# "Amazon ECS (standard)". This provider does NOT take Dockerfiles, Git commits, or
-# application source files.
-#
-# Instead, the CodePipeline ECS deploy action strictly expects an input artifact
-# containing a single JSON file formatted according to the AWS Image Definitions contract:
-#
-#   [
-#     {
-#       "name": "<container-name-matching-ecs-task-definition>",
-#       "imageUri": "<account-id>.dkr.ecr.<region>.amazonaws.com/<repo>@sha256:<digest>"
-#     }
-#   ]
-#
-# This buildspec automates the entire contract from source to deployment metadata:
-#   1. Quality Gate: It executes automated unit tests ('npm test'). If tests fail,
-#      the build fails immediately, preventing broken code from ever being published.
-#   2. Compilation: It builds the production Docker container from the repository Dockerfile.
-#   3. Publishing: It logs into Amazon ECR and pushes the image to 'notes-api' under
-#      a unique commit-and-build-number tag.
-#   4. Digest Pinning: It inspects the pushed image in ECR and retrieves its exact
-#      SHA-256 manifest digest ('@sha256:...'). Pinning by digest ensures that ECS runs
-#      the exact tested image bits, preventing tag mutability risks.
-#   5. Descriptor Generation: It writes 'imagedefinitions.json' matching the exact
-#      container name ('notes-api') defined in the ECS Task Definition.
-#   6. Artifact Packaging: It declares 'imagedefinitions.json' as the pipeline output artifact.
-#
-# DOWNSTREAM CONSUMER:
-# --------------------
-# CodePipeline passes this 'imagedefinitions.json' artifact to the ECS Deploy stage.
-# The ECS deploy action reads the file, inspects the active Task Definition for
-# 'notes-service', updates the 'notes-api' container image to the new pinned digest,
-# registers a new Task Definition revision, and instructs the ECS cluster to perform
-# a zero-downtime rolling update with automated circuit breaker rollback.
-# ==============================================================================
-
 version: 0.2
 
 phases:
   pre_build:
     commands:
-      - echo "=== [Pre-Build] Initializing build environment and ECR authentication ==="
-      # Dynamically query the AWS Account ID from the execution environment
+      - echo "=== [Pre-Build] Authenticating with ECR ==="
       - export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - export REPO_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/notes-api"
-      # Extract the short Git commit hash or fallback to manual
       - export COMMIT_HASH=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-local}" | cut -c1-7)
       - export TAG="${COMMIT_HASH}-${CODEBUILD_BUILD_NUMBER:-1}"
-      - echo "Target ECR Repository: ${REPO_URI}"
-      - echo "Generated Release Tag:  ${TAG}"
-      - echo "Logging in to Amazon ECR registry..."
       - aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
   build:
     commands:
-      - echo "=== [Build] Running test suite and compiling Docker image ==="
-      # Quality Gate: Execute automated unit tests. Any failure halts the pipeline immediately.
-      - echo "Executing unit tests (npm test)..."
+      - echo "=== [Build] Running tests and building container ==="
       - npm test
-      # Build the production container image
-      - echo "Building production Docker image: $REPO_URI:$TAG..."
-      - docker build -t "$REPO_URI:$TAG" .
+      - docker build -t "${REPO_URI}:${TAG}" .
 
   post_build:
     commands:
       - echo "=== [Post-Build] Pushing image and creating imagedefinitions.json ==="
-      # Push image to Amazon ECR
-      - echo "Pushing container image to ECR..."
       - docker push "${REPO_URI}:${TAG}"
-      # Query ECR to retrieve the immutable SHA-256 manifest digest
-      - echo "Resolving published image SHA-256 digest from ECR..."
-      - export DIGEST=$(aws ecr describe-images --repository-name notes-api --image-ids imageTag="${TAG}" --query 'imageDetails[0].imageDigest' --output text)
-      - test -n "${DIGEST}" && test "${DIGEST}" != "None"
-      - echo "Pushed Image Digest: ${DIGEST}"
-      # Generate the standard imagedefinitions.json contract required by CodePipeline ECS deployer
-      - echo "Generating imagedefinitions.json for ECS deploy action..."
+      - export DIGEST=$(aws ecr describe-images --repository-name notes-api --image-ids imageTag="${TAG}" --query "imageDetails[0].imageDigest" --output text)
       - printf '[{"name":"notes-api","imageUri":"%s@%s"}]\n' "${REPO_URI}" "${DIGEST}" > imagedefinitions.json
-      - echo "imagedefinitions.json content:"
       - cat imagedefinitions.json
 
 artifacts:
-  # Declare imagedefinitions.json as the sole output artifact for the Deploy stage
   files:
     - imagedefinitions.json
